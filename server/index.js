@@ -103,6 +103,23 @@ app.get('/stream/:fileId', async (req, res) => {
 io.on('connection', (socket) => {
     console.log('Usuario conectado: ' + socket.id);
 
+    //Unirse a una sala
+    socket.on('join_room', (roomId) => {
+        socket.join(roomId);
+        console.log(`Usuario ${socket.id} se unió a la sala: ${roomId}`);
+        socket.to(roomId).emit('user_joined', { userId: socket.id});
+    });
+
+    //Sincronizacion de reproducción
+    socket.on('sync_action', (data) => {
+        // data debe contener: { roomId, type, currentTime, videoUrl }
+        const { roomId, type } = data;
+        console.log(`Acción de sincronización en sala ${roomId}: ${type}`);
+
+        // Reenviar la acción a todos los demás en la sala
+        socket.to(roomId).emit('sync_action', data);
+    });
+
     socket.on('disconnect', () => {
         console.log('Usuario desconectado: ' + socket.id);
     });
