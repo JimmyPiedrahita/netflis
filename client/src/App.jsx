@@ -8,7 +8,6 @@ import './App.css';
 const socket = io('http://localhost:3001');
 
 function App() {
-  // ⚡ NUEVO: Inicializamos el estado leyendo del localStorage si existe
   const [user, setUser] = useState(() => {
     const savedUser = localStorage.getItem('user_data');
     return savedUser ? JSON.parse(savedUser) : null;
@@ -21,7 +20,6 @@ function App() {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   
-  // Estados de la Sala
   const [roomId, setRoomId] = useState(null);
   const [joinedRoom, setJoinedRoom] = useState(false);
   const [currentVideo, setCurrentVideo] = useState(null);
@@ -31,9 +29,8 @@ function App() {
   const isRemoteUpdate = useRef(false);
   const currentVideoRef = useRef(null);
 
-  // ⚡ NUEVO: Función de Logout (La sacamos afuera para poder usarla en varios lados)
+  // --- LOGOUT Y INTERCEPTOR ---
   const logout = useCallback(() => {
-    // 1. Limpiar estado
     setToken(null);
     setFiles([]);
     setUser(null);
@@ -41,59 +38,38 @@ function App() {
     setCurrentVideo(null);
     currentVideoRef.current = null;
     setRoomId(null);
-    
-    // 2. Limpiar URL
     window.history.pushState({}, document.title, window.location.pathname);
-    
-    // 3. ⚡ NUEVO: Borrar del disco duro del navegador
     localStorage.removeItem('access_token');
     localStorage.removeItem('user_data');
   }, []);
 
-  // ⚡ NUEVO: Interceptor de Axios (Nivel Profesional)
-  // Esto detecta si el token guardado ya venció (Google devuelve 401)
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
-      response => response, // Si todo sale bien, no hacemos nada
+      response => response,
       error => {
-        // Si Google dice "No autorizado" (401), es que el token venció
-        if (error.response && error.response.status === 401) {
-          console.warn("⚠️ Sesión expirada. Cerrando sesión...");
-          logout(); 
-        }
+        if (error.response && error.response.status === 401) logout(); 
         return Promise.reject(error);
       }
     );
-    // Limpieza del interceptor
     return () => axios.interceptors.response.eject(interceptor);
   }, [logout]);
 
-
-  // --- 0. LÓGICA DE URL ---
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get('room');
-
-    if (roomUrl) {
-      console.log("🔗 Detectado link de invitación:", roomUrl);
-      setRoomId(roomUrl);
-    }
+    if (roomUrl) setRoomId(roomUrl);
   }, []);
 
-  // ⚡ NUEVO: Efecto para recargar datos si ya estábamos logueados al entrar
   useEffect(() => {
     if (token && files.length === 0) {
       fetchVideos(token);
-      // Si había un room en la URL y ya tengo token, entro de una vez
       const params = new URLSearchParams(window.location.search);
       const roomUrl = params.get('room');
-      if (roomUrl && !joinedRoom) {
-         joinRoomExisting(roomUrl);
-      }
+      if (roomUrl && !joinedRoom) joinRoomExisting(roomUrl);
     }
-  }, [token]); // Se ejecuta cuando detecta que hay token
+  }, [token]);
 
-  // --- 1. LÓGICA DE SOCKETS ---
+  // --- 1. LÓGICA DE SOCKETS (CORREGIDA PARA SEEK) ---
   useEffect(() => {
     socket.on('user_joined', () => {
       if (currentVideoRef.current && videoRef.current) {
@@ -112,15 +88,44 @@ function App() {
       const video = videoRef.current;
 
       switch (data.type) {
-        case 'play': if(video) video.play().catch(e=>{}); break; 
-        case 'pause': if(video) video.pause(); break;  
+        case 'play':
+          if(video) {
+             if (Math.abs(video.currentTime - data.currentTime) > 0.5) {
+                 video.currentTime = data.currentTime; 
+             }
+             video.play().catch(e=>{});
+          }
+          break; 
+          
+        case 'pause': 
+          if(video) {
+            video.pause();
+            if (Math.abs(video.currentTime - data.currentTime) > 0.5) {
+                video.currentTime = data.currentTime;
+            }
+          }
+          break;  
+          
         case 'seek': 
-          if (video && Math.abs(video.currentTime - data.currentTime) > 1) video.currentTime = data.currentTime;
+          if(video) {
+             // 1. Saltamos al tiempo nuevo
+             video.currentTime = data.currentTime;
+             
+             // 2. VERIFICAMOS EL ESTADO QUE ENVIÓ EL EMISOR
+             // Si el que adelantó estaba reproduciendo, nosotros también
+             if (data.isPlaying) {
+                 video.play().catch(e=>{});
+             } else {
+                 video.pause();
+             }
+          }
           break;   
+          
         case 'change_video':
           setCurrentVideo(data.videoData);
           currentVideoRef.current = data.videoData; 
           break;
+          
         case 'sync_full_state':
           if (!currentVideoRef.current) {
              setCurrentVideo(data.videoData);
@@ -144,24 +149,55 @@ function App() {
     };
   }, [roomId]); 
 
-  // --- 2. LOGIN Y AUTO-JOIN ---
+
+  // --- 2. EMISORES DE EVENTOS ---
+
+  const handlePlay = () => {
+    if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      socket.emit('sync_action', { 
+        type: 'play', 
+        roomId,
+        currentTime: videoRef.current.currentTime 
+      });
+    }
+  };
+
+  const handlePause = () => {
+    if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      socket.emit('sync_action', { 
+        type: 'pause', 
+        roomId,
+        currentTime: videoRef.current.currentTime
+      });
+    }
+  };
+
+  const handleSeek = () => {
+    if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      // ⚡ CORRECCIÓN AQUÍ:
+      // Enviamos no solo el tiempo, sino si el video está pausado o no
+      // "paused" es true si está quieto. Queremos saber isPlaying.
+      const isPlaying = !videoRef.current.paused;
+      
+      socket.emit('sync_action', { 
+        type: 'seek', 
+        roomId, 
+        currentTime: videoRef.current.currentTime,
+        isPlaying: isPlaying // ⚡ Enviamos el estado futuro deseado
+      });
+    }
+  };
+
+  // --- RESTO ---
   const login = useGoogleLogin({
     onSuccess: (response) => {
       const newToken = response.access_token;
-      
-      // ⚡ NUEVO: Guardar en localStorage (Persistencia)
       localStorage.setItem('access_token', newToken);
       localStorage.setItem('user_data', JSON.stringify({ name: "Usuario Conectado" }));
-
       setToken(newToken);
       setUser({ name: "Usuario Conectado" });
-      
-      // Fetch inicial
       fetchVideos(newToken);
-
-      if (roomId) {
-        joinRoomExisting(roomId);
-      }
+      if (roomId) joinRoomExisting(roomId);
     },
     onError: (error) => console.log("Login fallo:", error),
     scope: "https://www.googleapis.com/auth/drive.readonly"
@@ -184,16 +220,12 @@ function App() {
     playVideo(file, newRoomId);
   };
 
-  // --- 3. REPRODUCTOR Y UTILIDADES ---
-  
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
     const streamUrl = `http://localhost:3001/stream/${file.id}?access_token=${token}`;
     const videoData = { ...file, url: streamUrl };
-    
     setCurrentVideo(videoData);
     currentVideoRef.current = videoData; 
-    
     socket.emit('sync_action', { type: 'change_video', roomId: targetRoom, videoData: videoData });
   }
 
@@ -202,10 +234,6 @@ function App() {
     navigator.clipboard.writeText(url);
     alert("¡Enlace copiado!");
   };
-
-  const handlePlay = () => !isRemoteUpdate.current && socket.emit('sync_action', { type: 'play', roomId });
-  const handlePause = () => !isRemoteUpdate.current && socket.emit('sync_action', { type: 'pause', roomId });
-  const handleSeek = () => !isRemoteUpdate.current && videoRef.current && socket.emit('sync_action', { type: 'seek', roomId, currentTime: videoRef.current.currentTime });
 
   const fetchVideos = async (accessToken) => {
     setLoading(true);
@@ -222,7 +250,6 @@ function App() {
   return (
     <div className="App">
       <h1 style={{textAlign: 'center', color: '#333'}}>🍿 Watch Party Drive</h1>
-
       {!token ? (
         <div style={{textAlign:'center', marginTop: '50px'}}>
           {roomId && <p style={{color: '#e50914', fontWeight: 'bold'}}>Has sido invitado a una sala. Inicia sesión para entrar.</p>}
@@ -232,7 +259,6 @@ function App() {
         </div>
       ) : (
         <div style={{padding: '20px'}}>
-          {/* HEADER */}
           {joinedRoom && (
              <div style={{textAlign: 'center', marginBottom: '20px', padding: '10px', background: '#f8f9fa', borderRadius: '10px'}}>
                 <span style={{marginRight: '10px'}}>🟢 Sala Activa</span>
@@ -241,8 +267,6 @@ function App() {
                 </button>
              </div>
           )}
-
-          {/* REPRODUCTOR */}
           {joinedRoom && currentVideo && (
             <div style={{ maxWidth: '900px', margin: '0 auto 30px auto', background: '#000', borderRadius: '10px', overflow: 'hidden' }}>
                <video 
@@ -262,8 +286,6 @@ function App() {
                </div>
             </div>
           )}
-
-          {/* LISTA */}
           {(!joinedRoom || isHost) && (
             <div style={{maxWidth: '1000px', margin: '0 auto'}}>
               <h3 style={{borderBottom: '2px solid #eee', paddingBottom: '10px'}}>
@@ -286,13 +308,9 @@ function App() {
               </div>
             </div>
           )}
-
           {joinedRoom && !isHost && (
-             <p style={{textAlign:'center', color: '#888', marginTop: '50px'}}>
-               El anfitrión controla el video.
-             </p>
+             <p style={{textAlign:'center', color: '#888', marginTop: '50px'}}>El anfitrión controla el video.</p>
           )}
-          
           <div style={{textAlign: 'center', marginTop: '50px'}}>
              <button onClick={logout} style={{ backgroundColor: '#6c757d', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '5px', cursor: 'pointer' }}>Cerrar sesión total</button>
           </div>
