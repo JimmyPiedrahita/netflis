@@ -41,6 +41,17 @@ export const useWatchParty = () => {
     localStorage.removeItem('user_data');
   }, []);
 
+  const leaveRoom = useCallback(() => {
+    setJoinedRoom(false);
+    setCurrentVideo(null);
+    currentVideoRef.current = null;
+    setRoomId(null);
+    setIsHost(false);
+    window.history.pushState({}, document.title, window.location.pathname);
+    // Opcional: emitir evento de salir de sala si el backend lo maneja
+    // socket.emit('leave_room', roomId); 
+  }, [roomId]);
+
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
       response => response,
@@ -49,6 +60,7 @@ export const useWatchParty = () => {
         return Promise.reject(error);
       }
     );
+
     return () => axios.interceptors.response.eject(interceptor);
   }, [logout]);
 
@@ -240,6 +252,7 @@ export const useWatchParty = () => {
     createRoomAndPlay,
     playVideo,
     handleLoginSuccess,
-    logout
+    logout,
+    leaveRoom
   };
 };

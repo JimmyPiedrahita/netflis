@@ -147,14 +147,31 @@ body {
 /* Room Info */
 .room-info {
   display: flex;
-  justify-content: center;
+  justify-content: space-between;
   align-items: center;
   gap: 1rem;
   margin-bottom: 2rem;
-  padding: 1rem;
+  padding: 1rem 2rem;
   background-color: var(--surface-color);
   border-radius: 12px;
   border: 1px solid var(--border-color);
+}
+
+.room-actions {
+  display: flex;
+  gap: 1rem;
+}
+
+.btn-leave {
+  background-color: transparent;
+  color: var(--danger-color);
+  border: 1px solid var(--danger-color);
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+}
+
+.btn-leave:hover {
+  background-color: rgba(239, 68, 68, 0.1);
 }
 
 .status-badge {

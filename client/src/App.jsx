@@ -24,7 +24,8 @@ function App() {
     createRoomAndPlay,
     playVideo,
     handleLoginSuccess,
-    logout
+    logout,
+    leaveRoom
   } = useWatchParty();
 
   const handleVideoSelect = (file) => {
@@ -44,7 +45,7 @@ function App() {
           <Login onSuccess={handleLoginSuccess} roomId={roomId} />
         ) : (
           <>
-            {joinedRoom && <RoomInfo />}
+            {joinedRoom && <RoomInfo onLeave={leaveRoom} />}
             
             <VideoPlayer 
               videoRef={videoRef}
