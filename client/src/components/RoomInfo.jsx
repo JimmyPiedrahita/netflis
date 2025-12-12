@@ -16,7 +16,6 @@ const RoomInfo = ({ onLeave, participantCount }) => {
       <div className="room-status-group">
         <span className="status-badge">
           <span className="live-indicator"></span>
-          Activa
         </span>
         <span className="participant-count" title="Usuarios en la sala">
           <UsersIcon />
