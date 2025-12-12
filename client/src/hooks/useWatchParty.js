@@ -3,7 +3,7 @@ import axios from 'axios';
 import io from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-const socket = io('https://netflis.practicas.me');
+const socket = io(import.meta.env.VITE_API_URL);
 
 export const useWatchParty = () => {
   const [user, setUser] = useState(() => {
@@ -22,6 +22,7 @@ export const useWatchParty = () => {
   const [joinedRoom, setJoinedRoom] = useState(false);
   const [currentVideo, setCurrentVideo] = useState(null);
   const [isHost, setIsHost] = useState(false);
+  const [participantCount, setParticipantCount] = useState(1);
   
   const videoRef = useRef(null);
   const isRemoteUpdate = useRef(false);
@@ -47,9 +48,10 @@ export const useWatchParty = () => {
     currentVideoRef.current = null;
     setRoomId(null);
     setIsHost(false);
+    setParticipantCount(1);
     window.history.pushState({}, document.title, window.location.pathname);
-    // Opcional: emitir evento de salir de sala si el backend lo maneja
-    // socket.emit('leave_room', roomId); 
+    // Emitir evento de salir de sala
+    if (roomId) socket.emit('leave_room', roomId); 
   }, [roomId]);
 
   useEffect(() => {
@@ -99,6 +101,10 @@ export const useWatchParty = () => {
 
   // --- LÓGICA DE SOCKETS ---
   useEffect(() => {
+    socket.on('room_users_update', (data) => {
+      setParticipantCount(data.count);
+    });
+
     socket.on('user_joined', () => {
       if (currentVideoRef.current && videoRef.current) {
         socket.emit('sync_action', { 
@@ -170,6 +176,7 @@ export const useWatchParty = () => {
     return () => {
       socket.off('sync_action');
       socket.off('user_joined');
+      socket.off('room_users_update');
     };
   }, [roomId]); 
 
@@ -208,7 +215,7 @@ export const useWatchParty = () => {
 
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
-    const streamUrl = `https://netflis.practicas.me/stream/${file.id}?access_token=${token}`;
+    const streamUrl = `${import.meta.env.VITE_API_URL}/stream/${file.id}?access_token=${token}`;
     const videoData = { ...file, url: streamUrl };
     setCurrentVideo(videoData);
     currentVideoRef.current = videoData; 
@@ -253,6 +260,7 @@ export const useWatchParty = () => {
     playVideo,
     handleLoginSuccess,
     logout,
-    leaveRoom
+    leaveRoom,
+    participantCount
   };
 };

@@ -7,12 +7,18 @@ const axios = require('axios');
 
 const app = express();
 
-const CLIENT_URL = process.env.CLIENT_URL;
+const allowedOrigins = [
+    'https://netflis123.web.app',      // Frontend Producción
+    'https://netflis.practicas.me',    // Backend Producción
+    'http://localhost:5173',           // Frontend Local
+    'http://localhost:3001'            // Backend Local
+];
 
-//Configuracion de CORS para permitir solicitudes desde el frontend
+//Configuracion de CORS para Express (API REST)
 app.use(cors({
-    origin: CLIENT_URL, // direccion de frontend
-    methods: ['GET', 'POST']
+    origin: allowedOrigins, // direccion de frontend
+    methods: ['GET', 'POST'],
+    credentials: true
 }));
 
 const server = http.createServer(app);
@@ -20,8 +26,9 @@ const server = http.createServer(app);
 //Configuracion de Socket.io (Sincronizacion)
 const io = new Server(server, {
     cors: {
-        origin: CLIENT_URL,
-        methods: ['GET', 'POST']
+        origin: allowedOrigins,
+        methods: ['GET', 'POST'],
+        credentials: true
     }
 });
 
@@ -83,7 +90,6 @@ app.get('/stream/:fileId', async (req, res) => {
 
         // Manejo de cierre de conexión
         res.on('close', () => {
-            console.log('Conexión cerrada por el cliente');
             driveResponse.data.destroy();
         });
 
@@ -101,23 +107,42 @@ app.get('/stream/:fileId', async (req, res) => {
 
 // -- SOCKET.IO --
 io.on('connection', (socket) => {
-    console.log('Usuario conectado: ' + socket.id);
 
     //Unirse a una sala
     socket.on('join_room', (roomId) => {
         socket.join(roomId);
-        console.log(`Usuario ${socket.id} se unió a la sala: ${roomId}`);
+        
+        // Emitir cantidad de usuarios en la sala
+        const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+        io.to(roomId).emit('room_users_update', { count: roomSize });
+
         socket.to(roomId).emit('user_joined', { userId: socket.id});
+    });
+
+    // Salir de una sala
+    socket.on('leave_room', (roomId) => {
+        socket.leave(roomId);
+        const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
+        io.to(roomId).emit('room_users_update', { count: roomSize });
     });
 
     //Sincronizacion de reproducción
     socket.on('sync_action', (data) => {
         // data debe contener: { roomId, type, currentTime, videoUrl }
         const { roomId, type } = data;
-        console.log(`Acción de sincronización en sala ${roomId}: ${type}`);
 
         // Reenviar la acción a todos los demás en la sala
         socket.to(roomId).emit('sync_action', data);
+    });
+
+    socket.on('disconnecting', () => {
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                const roomSize = io.sockets.adapter.rooms.get(room)?.size || 0;
+                // Restamos 1 porque el usuario aún está en la sala durante 'disconnecting'
+                io.to(room).emit('room_users_update', { count: Math.max(0, roomSize - 1) });
+            }
+        }
     });
 
     socket.on('disconnect', () => {

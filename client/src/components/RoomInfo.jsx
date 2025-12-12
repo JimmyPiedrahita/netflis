@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { LinkIcon, ExitIcon, CheckIcon } from './Icons';
+import { LinkIcon, ExitIcon, CheckIcon, UsersIcon } from './Icons';
 
-const RoomInfo = ({ onLeave }) => {
+const RoomInfo = ({ onLeave, participantCount }) => {
   const [copied, setCopied] = useState(false);
 
   const copyLink = () => {
@@ -13,10 +13,16 @@ const RoomInfo = ({ onLeave }) => {
 
   return (
     <div className="room-info">
-      <span className="status-badge">
-        <span className="live-indicator"></span>
-        Activa
-      </span>
+      <div className="room-status-group">
+        <span className="status-badge">
+          <span className="live-indicator"></span>
+          Activa
+        </span>
+        <span className="participant-count" title="Usuarios en la sala">
+          <UsersIcon />
+          {participantCount}
+        </span>
+      </div>
       <div className="room-actions">
         <button onClick={copyLink} className="btn btn-copy" disabled={copied}>
           {copied ? <CheckIcon /> : <LinkIcon />}
