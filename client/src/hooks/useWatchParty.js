@@ -3,7 +3,7 @@ import axios from 'axios';
 import io from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-const socket = io('http://localhost:3001');
+const socket = io('https://netflis.practicas.me');
 
 export const useWatchParty = () => {
   const [user, setUser] = useState(() => {
@@ -208,7 +208,7 @@ export const useWatchParty = () => {
 
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
-    const streamUrl = `http://localhost:3001/stream/${file.id}?access_token=${token}`;
+    const streamUrl = `https://netflis.practicas.me/stream/${file.id}?access_token=${token}`;
     const videoData = { ...file, url: streamUrl };
     setCurrentVideo(videoData);
     currentVideoRef.current = videoData; 
