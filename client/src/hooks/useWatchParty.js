@@ -15,6 +15,8 @@ export const useWatchParty = () => {
     return localStorage.getItem('access_token') || null;
   });
 
+  const refreshTokenRef = useRef(localStorage.getItem('refresh_token'));
+
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   
@@ -57,8 +59,38 @@ export const useWatchParty = () => {
   useEffect(() => {
     const interceptor = axios.interceptors.response.use(
       response => response,
-      error => {
-        if (error.response && error.response.status === 401) logout(); 
+      async (error) => {
+        const originalRequest = error.config;
+
+        // Si el error es 401 y no hemos intentado refrescar todavía
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          originalRequest._retry = true; // Marcar para no entrar en bucle infinito
+
+          try {
+            const storedRefreshToken = localStorage.getItem('refresh_token');
+            if (!storedRefreshToken) throw new Error('No refresh token');
+
+            // Pedir nuevo access token al backend
+            const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/refresh`, {
+                refreshToken: storedRefreshToken
+            });
+
+            const newAccessToken = res.data.access_token;
+
+            // Guardar y actualizar estado
+            localStorage.setItem('access_token', newAccessToken);
+            setToken(newAccessToken);
+
+            // Actualizar el header de la petición original y reintentarla
+            originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+            return axios(originalRequest);
+
+          } catch (refreshError) {
+            // Si el refresh falla (ej. expiró el refresh token), entonces sí hacemos logout
+            logout();
+            return Promise.reject(refreshError);
+          }
+        }
         return Promise.reject(error);
       }
     );
@@ -233,14 +265,37 @@ export const useWatchParty = () => {
     playVideo(file, newRoomId);
   };
 
-  const handleLoginSuccess = (response) => {
-    const newToken = response.access_token;
-    localStorage.setItem('access_token', newToken);
-    localStorage.setItem('user_data', JSON.stringify({ name: "Usuario Conectado" }));
-    setToken(newToken);
-    setUser({ name: "Usuario Conectado" });
-    fetchVideos(newToken);
-    if (roomId) joinRoomExisting(roomId);
+  const handleLoginSuccess = async (response) => {
+    try {
+        // 1. Recibimos el 'code' de Google
+        const { code } = response;
+        
+        // 2. Lo enviamos al backend
+        const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/google`, { code });
+        
+        // 3. Guardamos los tokens que nos devuelve el backend
+        const { access_token, refresh_token } = res.data;
+        
+        localStorage.setItem('access_token', access_token);
+        setToken(access_token);
+        
+        // El refresh token es la clave de la persistencia (¡Guardar solo si existe!)
+        if (refresh_token) {
+            localStorage.setItem('refresh_token', refresh_token);
+            refreshTokenRef.current = refresh_token;
+        }
+
+        // Datos de usuario dummy (o decodificar el ID token si el backend lo envía)
+        const userData = { name: "Usuario Conectado" };
+        localStorage.setItem('user_data', JSON.stringify(userData));
+        setUser(userData);
+        
+        fetchVideos(access_token);
+        if (roomId) joinRoomExisting(roomId);
+
+    } catch (error) {
+        console.error("Error en el intercambio de tokens:", error);
+    }
   };
 
   return {

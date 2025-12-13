@@ -6,6 +6,7 @@ const Login = ({ onSuccess, roomId }) => {
   const login = useGoogleLogin({
     onSuccess: onSuccess,
     onError: (error) => console.log("Login fallo:", error),
+    flow: 'auth-code',
     scope: "https://www.googleapis.com/auth/drive.readonly"
   });
 

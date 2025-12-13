@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { google } = require('googleapis');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -14,12 +15,21 @@ const allowedOrigins = [
     'http://localhost:3001'            // Backend Local
 ];
 
+// Configuración del Cliente OAuth2
+const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    'postmessage'
+);
+
 //Configuracion de CORS para Express (API REST)
 app.use(cors({
     origin: allowedOrigins, // direccion de frontend
     methods: ['GET', 'POST'],
     credentials: true
 }));
+
+app.use(express.json());
 
 const server = http.createServer(app);
 
@@ -102,6 +112,34 @@ app.get('/stream/:fileId', async (req, res) => {
         if (!res.headersSent) {
             res.sendStatus(500);
         }
+    }
+});
+
+// --- RUTAS DE AUTENTICACIÓN ---
+
+// 1. Ruta para canjear el código por tokens (Login inicial)
+app.post('/auth/google', async (req, res) => {
+    const { code } = req.body;
+    try {
+        // Canjeamos el código por tokens (access_token y refresh_token)
+        const { tokens } = await oauth2Client.getToken(code);
+        res.json(tokens);
+    } catch (error) {
+        console.error('Error al canjear token:', error);
+        res.status(500).send('Error de autenticación');
+    }
+});
+
+// 2. Ruta para renovar el token cuando caduca
+app.post('/auth/refresh', async (req, res) => {
+    const { refreshToken } = req.body;
+    try {
+        oauth2Client.setCredentials({ refresh_token: refreshToken });
+        const { credentials } = await oauth2Client.refreshAccessToken();
+        res.json(credentials);
+    } catch (error) {
+        console.error('Error al refrescar token:', error);
+        res.status(401).send('No se pudo refrescar');
     }
 });
 
