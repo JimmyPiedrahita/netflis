@@ -12,41 +12,37 @@ const app = express();
 
 const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
 
-
 // Configuración de reintentos para Axios
 axiosRetry(axios, { 
     retries: 3, 
     retryDelay: axiosRetry.exponentialDelay,
     retryCondition: (error) => {
-        // Reintentar solo si es error de red o error 5xx de Google
+        if (error) console.warn(`[AXIOS RETRY] Reintentando petición por error: ${error.message}`);
         return axiosRetry.isNetworkOrIdempotentRequestError(error) || error.response?.status >= 500;
     }
 });
 
-// Creamos un agente que mantiene las conexiones vivas (reutiliza el socket TCP)
 const httpsAgent = new https.Agent({ 
     keepAlive: true, 
-    keepAliveMsecs: 10000, // Mantener vivo por 10 segundos si no hay tráfico
-    maxSockets: 50 // Permitir varias conexiones simultáneas
+    keepAliveMsecs: 10000, 
+    maxSockets: 50 
 });
 
 const allowedOrigins = [
-    'https://netflis123.web.app',      // Frontend Producción
-    'https://netflis.practicas.me',    // Backend Producción
-    'http://localhost:5173',           // Frontend Local
-    'http://localhost:3001'            // Backend Local
+    'https://netflis123.web.app',      
+    'https://netflis.practicas.me',    
+    'http://localhost:5173',           
+    'http://localhost:3001'            
 ];
 
-// Configuración del Cliente OAuth2
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     'postmessage'
 );
 
-//Configuracion de CORS para Express (API REST)
 app.use(cors({
-    origin: allowedOrigins, // direccion de frontend
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true
 }));
@@ -55,7 +51,6 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
-//Configuracion de Socket.io (Sincronizacion)
 const io = new Server(server, {
     pingTimeout: 60000,
     pingInterval: 25000,
@@ -66,19 +61,27 @@ const io = new Server(server, {
     }
 });
 
+// -- MIDDLEWARE DE LOGGING GENERAL --
+app.use((req, res, next) => {
+    console.log(`[REQUEST] ${req.method} ${req.url} - IP: ${req.ip}`);
+    next();
+});
+
 // -- RUTAS -- 
 
-//Ruta de streaming de video desde Google Drive
+// Ruta de streaming de video desde Google Drive
 app.get('/stream/:fileId', async (req, res) => {
+    const startObj = Date.now();
     let { fileId } = req.params;
     const { access_token } = req.query;
+
+    console.log(`[STREAM-INIT] Solicitud de stream para FileID: ${fileId}`);
 
     if (!fileId) return res.status(400).send('Falta el fileId');
     if (!access_token) return res.status(401).send('Falta el Access token');
 
     try {
-        //Obtener el tamaño del archivo en Google Drive
-        //Necesario para validar rangos
+        console.log(`[STREAM-META] Obteniendo metadatos de Google Drive...`);
         const metadataResponse = await axios({
             method: 'get',
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
@@ -88,6 +91,7 @@ app.get('/stream/:fileId', async (req, res) => {
         });
 
         const totalSize = parseInt(metadataResponse.data.size, 10);
+        console.log(`[STREAM-META] Tamaño total del archivo: ${totalSize} bytes (${(totalSize/1024/1024).toFixed(2)} MB)`);
 
         const range = req.headers.range;
         let start = 0;
@@ -99,37 +103,38 @@ app.get('/stream/:fileId', async (req, res) => {
             if (parts[1]) {
                 end = parseInt(parts[1], 10);
             }
+            console.log(`[STREAM-RANGE] Cliente solicitó rango: ${range} (Parsed: ${start}-${end})`);
+        } else {
+            console.log(`[STREAM-RANGE] Cliente NO solicitó rango. Enviando desde 0.`);
         }
 
-        //Forzamos un tamaño máximo de chunk para evitar sobrecargar el servidor
         const chunkEnd = Math.min(end, start + CHUNK_SIZE_BYTES - 1);
+        console.log(`[STREAM-CHUNK] Solicitando a Google Bytes: ${start}-${chunkEnd} (Tamaño chunk: ${(chunkEnd - start + 1)} bytes)`);
 
-        // Headers que enviaremos a Google
         const headers = {
             Authorization: `Bearer ${access_token}`,
             Range: `bytes=${start}-${chunkEnd}`
         };
 
-        // Si el navegador (ReactPlayer) pide un minuto específico, se lo pasamos a Google
         if (req.headers.range) {
             headers['Range'] = req.headers.range;
         }
 
-        // Petición directa a Google como flujo de datos (Stream)
+        const driveStartTime = Date.now();
         const driveResponse = await axios({
             method: 'get',
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
             headers: headers,
-            responseType: 'stream', // Recibir como tubería
-            httpsAgent: httpsAgent, // Usar el agente con keep-alive
-            validateStatus: (status) => status < 500, // No lanzar error en 4xx para poder leer el body si es json
+            responseType: 'stream',
+            httpsAgent: httpsAgent,
+            validateStatus: (status) => status < 500,
             timeout: 0
         });
 
-        // Manejo de errores desde Google Drive
+        console.log(`[STREAM-DRIVE-RES] Respuesta recibida de Google en ${Date.now() - driveStartTime}ms. Status: ${driveResponse.status}`);
+
         if (driveResponse.status >= 400) {
-             console.error("Error desde Google Drive (Stream):", driveResponse.status);
-             // Devolvemos el mismo error al cliente
+             console.error(`[STREAM-ERROR] Error desde Google Drive: ${driveResponse.status}`);
              return res.sendStatus(driveResponse.status);
         }
 
@@ -143,76 +148,89 @@ app.get('/stream/:fileId', async (req, res) => {
             'Cache-Control': 'public, max-age=31536000, immutable',
         });
 
-        // Pipe: Enviar el stream de Google directamente al cliente
+        // LOGGING DE FLUJO DE DATOS
+        let downloadedBytes = 0;
+        driveResponse.data.on('data', (chunk) => {
+            downloadedBytes += chunk.length;
+            // Descomenta la siguiente linea si quieres ver CADA pedazo (mucho ruido en consola)
+            // console.log(`[STREAM-DATA] Recibido chunk de ${chunk.length} bytes.`);
+        });
+
+        driveResponse.data.on('end', () => {
+            console.log(`[STREAM-END] Stream finalizado desde Google. Total transferido: ${downloadedBytes} bytes. Tiempo total request: ${Date.now() - startObj}ms`);
+        });
+
+        driveResponse.data.on('error', (err) => {
+            console.error(`[STREAM-ERROR] Error en el stream de datos de Google:`, err.message);
+        });
+
         driveResponse.data.pipe(res);
 
-        // Manejo de cierre de conexión
         res.on('close', () => {
+            console.log(`[STREAM-CLOSE] Conexión cerrada por el cliente (Navegador). Bytes enviados: ${downloadedBytes}`);
             driveResponse.data.destroy();
         });
 
     } catch (error) {
-        if (error.code === 'ECONNABORTED' || error.message === 'aborted') return;
-        console.error('Error Stream:', error.message);
+        if (error.code === 'ECONNABORTED' || error.message === 'aborted') {
+            console.log('[STREAM-ABORT] Conexión abortada.');
+            return;
+        }
+        console.error('[STREAM-CRITICAL] Error Stream:', error.message);
         if (!res.headersSent) res.sendStatus(500);
     }
 });
 
 // --- RUTAS DE AUTENTICACIÓN ---
-
-// 1. Ruta para canjear el código por tokens (Login inicial)
 app.post('/auth/google', async (req, res) => {
+    console.log('[AUTH] Petición de login recibida');
     const { code } = req.body;
     try {
-        // Canjeamos el código por tokens (access_token y refresh_token)
         const { tokens } = await oauth2Client.getToken(code);
+        console.log('[AUTH] Tokens obtenidos correctamente');
         res.json(tokens);
     } catch (error) {
-        console.error('Error al canjear token:', error);
+        console.error('[AUTH-ERROR] Error al canjear token:', error.message);
         res.status(500).send('Error de autenticación');
     }
 });
 
-// 2. Ruta para renovar el token cuando caduca
 app.post('/auth/refresh', async (req, res) => {
+    console.log('[AUTH] Petición de refresh token');
     const { refreshToken } = req.body;
     try {
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const { credentials } = await oauth2Client.refreshAccessToken();
+        console.log('[AUTH] Token refrescado correctamente');
         res.json(credentials);
     } catch (error) {
-        console.error('Error al refrescar token:', error);
+        console.error('[AUTH-ERROR] Error al refrescar token:', error.message);
         res.status(401).send('No se pudo refrescar');
     }
 });
 
 // -- SOCKET.IO --
 io.on('connection', (socket) => {
+    console.log(`[SOCKET] Nuevo cliente conectado: ${socket.id}`);
 
-    //Unirse a una sala
     socket.on('join_room', (roomId) => {
+        console.log(`[SOCKET] Cliente ${socket.id} se une a sala ${roomId}`);
         socket.join(roomId);
-        
-        // Emitir cantidad de usuarios en la sala
         const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
         io.to(roomId).emit('room_users_update', { count: roomSize });
-
         socket.to(roomId).emit('user_joined', { userId: socket.id});
     });
 
-    // Salir de una sala
     socket.on('leave_room', (roomId) => {
+        console.log(`[SOCKET] Cliente ${socket.id} deja sala ${roomId}`);
         socket.leave(roomId);
         const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
         io.to(roomId).emit('room_users_update', { count: roomSize });
     });
 
-    //Sincronizacion de reproducción
     socket.on('sync_action', (data) => {
-        // data debe contener: { roomId, type, currentTime, videoUrl }
-        const { roomId, type } = data;
-
-        // Reenviar la acción a todos los demás en la sala
+        console.log(`[SOCKET-SYNC] Acción recibida en sala ${data.roomId}:`, JSON.stringify(data));
+        const { roomId } = data;
         socket.to(roomId).emit('sync_action', data);
     });
 
@@ -220,18 +238,16 @@ io.on('connection', (socket) => {
         for (const room of socket.rooms) {
             if (room !== socket.id) {
                 const roomSize = io.sockets.adapter.rooms.get(room)?.size || 0;
-                // Restamos 1 porque el usuario aún está en la sala durante 'disconnecting'
                 io.to(room).emit('room_users_update', { count: Math.max(0, roomSize - 1) });
             }
         }
     });
 
     socket.on('disconnect', () => {
-        console.log('Usuario desconectado: ' + socket.id);
+        console.log(`[SOCKET] Cliente desconectado: ${socket.id}`);
     });
 });
 
-//Iniciar el servidor
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
     console.log(`Servidor corriendo en el puerto ${PORT}`);

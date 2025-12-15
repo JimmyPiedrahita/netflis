@@ -32,6 +32,7 @@ export const useWatchParty = () => {
 
   // --- LOGOUT Y INTERCEPTOR ---
   const logout = useCallback(() => {
+    console.log("[HOOK] Logout ejecutado");
     setToken(null);
     setFiles([]);
     setUser(null);
@@ -45,6 +46,7 @@ export const useWatchParty = () => {
   }, []);
 
   const leaveRoom = useCallback(() => {
+    console.log("[HOOK] Abandonando sala:", roomId);
     setJoinedRoom(false);
     setCurrentVideo(null);
     currentVideoRef.current = null;
@@ -52,7 +54,6 @@ export const useWatchParty = () => {
     setIsHost(false);
     setParticipantCount(1);
     window.history.pushState({}, document.title, window.location.pathname);
-    // Emitir evento de salir de sala
     if (roomId) socket.emit('leave_room', roomId); 
   }, [roomId]);
 
@@ -61,32 +62,25 @@ export const useWatchParty = () => {
       response => response,
       async (error) => {
         const originalRequest = error.config;
-
-        // Si el error es 401 y no hemos intentado refrescar todavía
         if (error.response?.status === 401 && !originalRequest._retry) {
-          originalRequest._retry = true; // Marcar para no entrar en bucle infinito
-
+          console.warn("[HOOK] 401 detectado, intentando refresh token...");
+          originalRequest._retry = true;
           try {
             const storedRefreshToken = localStorage.getItem('refresh_token');
             if (!storedRefreshToken) throw new Error('No refresh token');
 
-            // Pedir nuevo access token al backend
             const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/refresh`, {
                 refreshToken: storedRefreshToken
             });
 
             const newAccessToken = res.data.access_token;
-
-            // Guardar y actualizar estado
+            console.log("[HOOK] Access token renovado exitosamente");
             localStorage.setItem('access_token', newAccessToken);
             setToken(newAccessToken);
-
-            // Actualizar el header de la petición original y reintentarla
             originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
             return axios(originalRequest);
-
           } catch (refreshError) {
-            // Si el refresh falla (ej. expiró el refresh token), entonces sí hacemos logout
+            console.error("[HOOK] Fallo el refresh token, haciendo logout", refreshError);
             logout();
             return Promise.reject(refreshError);
           }
@@ -94,29 +88,34 @@ export const useWatchParty = () => {
         return Promise.reject(error);
       }
     );
-
     return () => axios.interceptors.response.eject(interceptor);
   }, [logout]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get('room');
-    if (roomUrl) setRoomId(roomUrl);
+    if (roomUrl) {
+        console.log("[HOOK] Room detectada en URL:", roomUrl);
+        setRoomId(roomUrl);
+    }
   }, []);
 
   const fetchVideos = useCallback(async (accessToken) => {
+    console.log("[HOOK] Obteniendo lista de videos...");
     setLoading(true);
     try {
       const response = await axios.get('https://www.googleapis.com/drive/v3/files', {
         headers: { Authorization: `Bearer ${accessToken}` },
         params: { q: "mimeType contains 'video/' and trashed = false", fields: 'files(id, name, mimeType, size)', pageSize: 20 },
       });
+      console.log(`[HOOK] ${response.data.files.length} videos obtenidos.`);
       setFiles(response.data.files);
-    } catch (error) { console.error(error); }
+    } catch (error) { console.error("[HOOK] Error fetching videos:", error); }
     setLoading(false);
   }, []);
 
   const joinRoomExisting = useCallback((id) => {
+    console.log("[HOOK] Uniendo a sala existente:", id);
     socket.emit('join_room', id);
     setJoinedRoom(true);
     setIsHost(false);
@@ -133,11 +132,15 @@ export const useWatchParty = () => {
 
   // --- LÓGICA DE SOCKETS ---
   useEffect(() => {
+    socket.on('connect', () => console.log("[SOCKET] Conectado al servidor Socket.io"));
+    
     socket.on('room_users_update', (data) => {
+      console.log("[SOCKET] Usuarios en sala actualizados:", data.count);
       setParticipantCount(data.count);
     });
 
     socket.on('user_joined', () => {
+      console.log("[SOCKET] Nuevo usuario entró. Enviando sync_full_state...");
       if (currentVideoRef.current && videoRef.current) {
         socket.emit('sync_action', { 
           type: 'sync_full_state',
@@ -150,6 +153,7 @@ export const useWatchParty = () => {
     });
 
     socket.on('sync_action', (data) => {
+      console.log(`[SOCKET-IN] Evento recibido: ${data.type} | Time: ${data.currentTime}`);
       isRemoteUpdate.current = true;
       const video = videoRef.current;
 
@@ -157,9 +161,10 @@ export const useWatchParty = () => {
         case 'play':
           if(video) {
              if (Math.abs(video.currentTime - data.currentTime) > 0.5) {
+                 console.log("[SYNC] Ajustando tiempo por desincronización > 0.5s");
                  video.currentTime = data.currentTime; 
              }
-             video.play().catch(e=>{});
+             video.play().catch(e=>{ console.warn("[SYNC] Error al intentar play remoto:", e) });
           }
           break; 
           
@@ -174,6 +179,7 @@ export const useWatchParty = () => {
           
         case 'seek': 
           if(video) {
+             console.log("[SYNC] Seek remoto ejecutado");
              video.currentTime = data.currentTime;
              if (data.isPlaying) {
                  video.play().catch(e=>{});
@@ -184,12 +190,14 @@ export const useWatchParty = () => {
           break;   
           
         case 'change_video':
+          console.log("[SYNC] Cambio de video remoto:", data.videoData.name);
           setCurrentVideo(data.videoData);
           currentVideoRef.current = data.videoData; 
           break;
           
         case 'sync_full_state':
           if (!currentVideoRef.current) {
+             console.log("[SYNC] Estado inicial recibido.");
              setCurrentVideo(data.videoData);
              currentVideoRef.current = data.videoData;
              setTimeout(() => {
@@ -202,10 +210,12 @@ export const useWatchParty = () => {
           break;   
         default: break;
       }
+      // Reducido el tiempo de bloqueo remoto para evitar bloqueos
       setTimeout(() => { isRemoteUpdate.current = false; }, 500);
     });
 
     return () => {
+      socket.off('connect');
       socket.off('sync_action');
       socket.off('user_joined');
       socket.off('room_users_update');
@@ -215,16 +225,20 @@ export const useWatchParty = () => {
   // --- ACCIONES ---
   const handlePlay = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      console.log("[USER] Play local -> Emitiendo");
       socket.emit('sync_action', { 
         type: 'play', 
         roomId,
         currentTime: videoRef.current.currentTime 
       });
+    } else {
+        console.log("[USER] Play ignorado (Remote Update activo)");
     }
   };
 
   const handlePause = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      console.log("[USER] Pause local -> Emitiendo");
       socket.emit('sync_action', { 
         type: 'pause', 
         roomId,
@@ -235,6 +249,7 @@ export const useWatchParty = () => {
 
   const handleSeek = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
+      console.log("[USER] Seek local -> Emitiendo");
       const isPlaying = !videoRef.current.paused;
       socket.emit('sync_action', { 
         type: 'seek', 
@@ -247,6 +262,7 @@ export const useWatchParty = () => {
 
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
+    console.log(`[ACTION] Reproduciendo video: ${file.name} en sala ${targetRoom}`);
     const streamUrl = `${import.meta.env.VITE_API_URL}/stream/${file.id}?access_token=${token}`;
     const videoData = { ...file, url: streamUrl };
     setCurrentVideo(videoData);
@@ -266,26 +282,20 @@ export const useWatchParty = () => {
   };
 
   const handleLoginSuccess = async (response) => {
+    console.log("[LOGIN] Login exitoso con Google, procesando...");
     try {
-        // 1. Recibimos el 'code' de Google
         const { code } = response;
-        
-        // 2. Lo enviamos al backend
         const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/google`, { code });
-        
-        // 3. Guardamos los tokens que nos devuelve el backend
         const { access_token, refresh_token } = res.data;
         
         localStorage.setItem('access_token', access_token);
         setToken(access_token);
         
-        // El refresh token es la clave de la persistencia (¡Guardar solo si existe!)
         if (refresh_token) {
             localStorage.setItem('refresh_token', refresh_token);
             refreshTokenRef.current = refresh_token;
         }
 
-        // Datos de usuario dummy (o decodificar el ID token si el backend lo envía)
         const userData = { name: "Usuario Conectado" };
         localStorage.setItem('user_data', JSON.stringify(userData));
         setUser(userData);
@@ -294,7 +304,7 @@ export const useWatchParty = () => {
         if (roomId) joinRoomExisting(roomId);
 
     } catch (error) {
-        console.error("Error en el intercambio de tokens:", error);
+        console.error("[LOGIN] Error en el intercambio de tokens:", error);
     }
   };
 
