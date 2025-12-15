@@ -40,7 +40,7 @@ app.use(cors({
 
 app.use(express.json());
 
-const server = http.createServer(app);
+const server = https.createServer(app);
 
 //Configuracion de Socket.io (Sincronizacion)
 const io = new Server(server, {
