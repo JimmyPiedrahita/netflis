@@ -2,6 +2,7 @@ require('dotenv').config();
 const { google } = require('googleapis');
 const express = require('express');
 const https = require('https');
+const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
@@ -40,7 +41,7 @@ app.use(cors({
 
 app.use(express.json());
 
-const server = https.createServer(app);
+const server = http.createServer(app);
 
 //Configuracion de Socket.io (Sincronizacion)
 const io = new Server(server, {
