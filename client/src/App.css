@@ -1,14 +1,15 @@
 :root {
-  --bg-color: #121212;
+  --bg-color: #141414;
   --surface-color: #1e1e1e;
-  --primary-color: #3b82f6;
-  --primary-hover: #2563eb;
+  --primary-color: #E50914;
+  --primary-hover: #b20710;
   --text-primary: #e5e7eb;
   --text-secondary: #9ca3af;
   --border-color: #374151;
   --success-color: #10b981;
   --danger-color: #ef4444;
-  --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-family: 'Roboto', system-ui, -apple-system, sans-serif;
+  --font-heading: 'Bebas Neue', sans-serif;
 }
 
 body {
@@ -45,8 +46,10 @@ body {
 .logo-container h1 {
   margin: 0;
   font-size: 1.5rem;
-  font-weight: 600;
-  color: var(--text-primary);
+  font-weight: 400;
+  font-family: var(--font-heading);
+  color: var(--primary-color);
+  letter-spacing: 2px;
 }
 
 .logo-container svg {
