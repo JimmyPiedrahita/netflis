@@ -29,6 +29,7 @@ export const useWatchParty = () => {
   const videoRef = useRef(null);
   const isRemoteUpdate = useRef(false);
   const currentVideoRef = useRef(null);
+  const retryCount = useRef(0);
 
   // --- LOGOUT Y INTERCEPTOR ---
   const logout = useCallback(() => {
@@ -76,7 +77,8 @@ export const useWatchParty = () => {
             const newAccessToken = res.data.access_token;
             console.log("[HOOK] Access token renovado exitosamente");
             localStorage.setItem('access_token', newAccessToken);
-            setToken(newAccessToken);
+            setToken(newAccessToken); // Esto disparará el useEffect de actualización de URL
+            
             originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
             return axios(originalRequest);
           } catch (refreshError) {
@@ -91,31 +93,82 @@ export const useWatchParty = () => {
     return () => axios.interceptors.response.eject(interceptor);
   }, [logout]);
 
+  // --- AUTO-REFRESH URL CUANDO CAMBIA EL TOKEN ---
+  useEffect(() => {
+    if (token && currentVideoRef.current) {
+        // Si tenemos un video cargado y el token cambió, actualizamos la URL
+        const currentUrl = currentVideoRef.current.url;
+        const urlObj = new URL(currentUrl);
+        const oldToken = urlObj.searchParams.get('access_token');
+
+        if (oldToken !== token) {
+            console.log("[HOOK] Token nuevo detectado. Actualizando URL del video...");
+            const newUrl = `${import.meta.env.VITE_API_URL}/stream/${currentVideoRef.current.id}?access_token=${token}`;
+            const updatedVideo = { ...currentVideoRef.current, url: newUrl };
+            
+            // Actualizamos localmente
+            setCurrentVideo(updatedVideo);
+            currentVideoRef.current = updatedVideo;
+            
+            // Si somos Host, enviamos la nueva URL válida a todos
+            if (isHost && roomId) {
+                 console.log("[HOOK] Como HOST, enviando nueva URL a la sala.");
+                 // Enviamos con isPlaying: false para evitar saltos bruscos mientras reconectan
+                 socket.emit('sync_action', { 
+                     type: 'change_video', 
+                     roomId: roomId, 
+                     videoData: updatedVideo 
+                 });
+            }
+        }
+    }
+  }, [token, isHost, roomId]);
+
+  // --- MANEJO DE ERROR DE VIDEO (RECUPERACIÓN) ---
+  const handleVideoError = useCallback(() => {
+      console.error("[VIDEO-ERROR] Error en reproducción. Intentando recuperar...");
+      
+      if (retryCount.current > 3) {
+          console.error("[VIDEO-ERROR] Demasiados intentos fallidos.");
+          return;
+      }
+      retryCount.current += 1;
+
+      // Hacemos una petición dummy protegida para forzar al interceptor a renovar el token si es 401
+      // Usamos fetchVideos o cualquier endpoint ligero que requiera auth
+      console.log("[VIDEO-ERROR] Forzando verificación de token...");
+      axios.get('https://www.googleapis.com/drive/v3/files', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { pageSize: 1 } // Petición mínima
+      }).catch(err => {
+          console.log("Error en petición de recuperación (esto es normal si era 401):", err.message);
+      });
+      
+      // Reset contador después de un rato
+      setTimeout(() => { retryCount.current = 0; }, 10000);
+
+  }, [token]);
+
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomUrl = params.get('room');
-    if (roomUrl) {
-        console.log("[HOOK] Room detectada en URL:", roomUrl);
-        setRoomId(roomUrl);
-    }
+    if (roomUrl) setRoomId(roomUrl);
   }, []);
 
   const fetchVideos = useCallback(async (accessToken) => {
-    console.log("[HOOK] Obteniendo lista de videos...");
     setLoading(true);
     try {
       const response = await axios.get('https://www.googleapis.com/drive/v3/files', {
         headers: { Authorization: `Bearer ${accessToken}` },
         params: { q: "mimeType contains 'video/' and trashed = false", fields: 'files(id, name, mimeType, size)', pageSize: 20 },
       });
-      console.log(`[HOOK] ${response.data.files.length} videos obtenidos.`);
       setFiles(response.data.files);
-    } catch (error) { console.error("[HOOK] Error fetching videos:", error); }
+    } catch (error) { console.error(error); }
     setLoading(false);
   }, []);
 
   const joinRoomExisting = useCallback((id) => {
-    console.log("[HOOK] Uniendo a sala existente:", id);
     socket.emit('join_room', id);
     setJoinedRoom(true);
     setIsHost(false);
@@ -132,15 +185,11 @@ export const useWatchParty = () => {
 
   // --- LÓGICA DE SOCKETS ---
   useEffect(() => {
-    socket.on('connect', () => console.log("[SOCKET] Conectado al servidor Socket.io"));
-    
     socket.on('room_users_update', (data) => {
-      console.log("[SOCKET] Usuarios en sala actualizados:", data.count);
       setParticipantCount(data.count);
     });
 
     socket.on('user_joined', () => {
-      console.log("[SOCKET] Nuevo usuario entró. Enviando sync_full_state...");
       if (currentVideoRef.current && videoRef.current) {
         socket.emit('sync_action', { 
           type: 'sync_full_state',
@@ -153,7 +202,6 @@ export const useWatchParty = () => {
     });
 
     socket.on('sync_action', (data) => {
-      console.log(`[SOCKET-IN] Evento recibido: ${data.type} | Time: ${data.currentTime}`);
       isRemoteUpdate.current = true;
       const video = videoRef.current;
 
@@ -161,10 +209,9 @@ export const useWatchParty = () => {
         case 'play':
           if(video) {
              if (Math.abs(video.currentTime - data.currentTime) > 0.5) {
-                 console.log("[SYNC] Ajustando tiempo por desincronización > 0.5s");
                  video.currentTime = data.currentTime; 
              }
-             video.play().catch(e=>{ console.warn("[SYNC] Error al intentar play remoto:", e) });
+             video.play().catch(e=>{});
           }
           break; 
           
@@ -179,7 +226,6 @@ export const useWatchParty = () => {
           
         case 'seek': 
           if(video) {
-             console.log("[SYNC] Seek remoto ejecutado");
              video.currentTime = data.currentTime;
              if (data.isPlaying) {
                  video.play().catch(e=>{});
@@ -190,14 +236,16 @@ export const useWatchParty = () => {
           break;   
           
         case 'change_video':
-          console.log("[SYNC] Cambio de video remoto:", data.videoData.name);
-          setCurrentVideo(data.videoData);
-          currentVideoRef.current = data.videoData; 
+          // Solo actualizamos si es un video diferente o si la URL (token) cambió
+          if (!currentVideoRef.current || currentVideoRef.current.id !== data.videoData.id || currentVideoRef.current.url !== data.videoData.url) {
+              console.log("[SYNC] Actualizando video/token remoto");
+              setCurrentVideo(data.videoData);
+              currentVideoRef.current = data.videoData; 
+          }
           break;
           
         case 'sync_full_state':
           if (!currentVideoRef.current) {
-             console.log("[SYNC] Estado inicial recibido.");
              setCurrentVideo(data.videoData);
              currentVideoRef.current = data.videoData;
              setTimeout(() => {
@@ -210,12 +258,10 @@ export const useWatchParty = () => {
           break;   
         default: break;
       }
-      // Reducido el tiempo de bloqueo remoto para evitar bloqueos
       setTimeout(() => { isRemoteUpdate.current = false; }, 500);
     });
 
     return () => {
-      socket.off('connect');
       socket.off('sync_action');
       socket.off('user_joined');
       socket.off('room_users_update');
@@ -225,20 +271,16 @@ export const useWatchParty = () => {
   // --- ACCIONES ---
   const handlePlay = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
-      console.log("[USER] Play local -> Emitiendo");
       socket.emit('sync_action', { 
         type: 'play', 
         roomId,
         currentTime: videoRef.current.currentTime 
       });
-    } else {
-        console.log("[USER] Play ignorado (Remote Update activo)");
     }
   };
 
   const handlePause = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
-      console.log("[USER] Pause local -> Emitiendo");
       socket.emit('sync_action', { 
         type: 'pause', 
         roomId,
@@ -249,7 +291,6 @@ export const useWatchParty = () => {
 
   const handleSeek = () => {
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
-      console.log("[USER] Seek local -> Emitiendo");
       const isPlaying = !videoRef.current.paused;
       socket.emit('sync_action', { 
         type: 'seek', 
@@ -262,7 +303,6 @@ export const useWatchParty = () => {
 
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
-    console.log(`[ACTION] Reproduciendo video: ${file.name} en sala ${targetRoom}`);
     const streamUrl = `${import.meta.env.VITE_API_URL}/stream/${file.id}?access_token=${token}`;
     const videoData = { ...file, url: streamUrl };
     setCurrentVideo(videoData);
@@ -282,7 +322,6 @@ export const useWatchParty = () => {
   };
 
   const handleLoginSuccess = async (response) => {
-    console.log("[LOGIN] Login exitoso con Google, procesando...");
     try {
         const { code } = response;
         const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/google`, { code });
@@ -304,7 +343,7 @@ export const useWatchParty = () => {
         if (roomId) joinRoomExisting(roomId);
 
     } catch (error) {
-        console.error("[LOGIN] Error en el intercambio de tokens:", error);
+        console.error("Error en el intercambio de tokens:", error);
     }
   };
 
@@ -326,6 +365,7 @@ export const useWatchParty = () => {
     handleLoginSuccess,
     logout,
     leaveRoom,
-    participantCount
+    participantCount,
+    handleVideoError
   };
 };

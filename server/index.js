@@ -176,6 +176,14 @@ app.get('/stream/:fileId', async (req, res) => {
             console.log('[STREAM-ABORT] Conexión abortada.');
             return;
         }
+        
+        // Si el error tiene respuesta (ej: 401 de Google), la devolvemos tal cual
+        if (error.response && error.response.status) {
+            console.error(`[STREAM-ERROR-GOOGLE] Google devolvió: ${error.response.status}`);
+            if (!res.headersSent) return res.sendStatus(error.response.status);
+        }
+        // -------------------
+
         console.error('[STREAM-CRITICAL] Error Stream:', error.message);
         if (!res.headersSent) res.sendStatus(500);
     }

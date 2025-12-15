@@ -26,7 +26,8 @@ function App() {
     handleLoginSuccess,
     logout,
     leaveRoom,
-    participantCount
+    participantCount,
+    handleVideoError
   } = useWatchParty();
 
   const handleVideoSelect = (file) => {
@@ -40,23 +41,24 @@ function App() {
   return (
     <div className="App">
       <Header user={user} logout={logout} />
-      
+
       <main className="main-content">
         {!token ? (
           <Login onSuccess={handleLoginSuccess} roomId={roomId} />
         ) : (
           <>
             {joinedRoom && <RoomInfo onLeave={leaveRoom} participantCount={participantCount} />}
-            
-            <VideoPlayer 
+
+            <VideoPlayer
               videoRef={videoRef}
               currentVideo={currentVideo}
               onPlay={handlePlay}
               onPause={handlePause}
               onSeek={handleSeek}
+              onError={handleVideoError}
             />
-            
-            <VideoList 
+
+            <VideoList
               files={files}
               loading={loading}
               joinedRoom={joinedRoom}
