@@ -8,6 +8,8 @@ const axios = require('axios');
 
 const app = express();
 
+const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+
 const allowedOrigins = [
     'https://netflis123.web.app',      // Frontend Producción
     'https://netflis.practicas.me',    // Backend Producción
@@ -49,18 +51,39 @@ app.get('/stream/:fileId', async (req, res) => {
     let { fileId } = req.params;
     const { access_token } = req.query;
 
-    if (!fileId) {
-        return res.status(400).send('Falta el fileId');
-    }
-    
-    if (!access_token) {
-        return res.status(401).send('Falta el Access token');
-    }
+    if (!fileId) return res.status(400).send('Falta el fileId');
+    if (!access_token) return res.status(401).send('Falta el Access token');
 
     try {
+        //Obtener el tamaño del archivo en Google Drive
+        //Necesario para validar rangos
+        const metadataResponse = await axios({
+            method: 'get',
+            url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
+            headers: { Authorization: `Bearer ${access_token}` }
+        });
+
+        const totalSize = parseInt(metadataResponse.data.size, 10);
+
+        const range = req.headers.range;
+        let start = 0;
+        let end = totalSize - 1;
+
+        if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            start = parseInt(parts[0], 10);
+            if (parts[1]) {
+                end = parseInt(parts[1], 10);
+            }
+        }
+
+        //Forzamos un tamaño máximo de chunk para evitar sobrecargar el servidor
+        const chunkEnd = Math.min(end, start + CHUNK_SIZE_BYTES - 1);
+
         // Headers que enviaremos a Google
         const headers = {
             Authorization: `Bearer ${access_token}`,
+            Range: `bytes=${start}-${chunkEnd}`
         };
 
         // Si el navegador (ReactPlayer) pide un minuto específico, se lo pasamos a Google
@@ -84,16 +107,14 @@ app.get('/stream/:fileId', async (req, res) => {
              return res.sendStatus(driveResponse.status);
         }
 
-        // Copiamos los headers de respuesta de Google hacia tu navegador
-        res.set('Content-Range', driveResponse.headers['content-range']);
-        res.set('Accept-Ranges', driveResponse.headers['accept-ranges']);
-        if (driveResponse.headers['content-length']){
-            res.set('Content-Length', driveResponse.headers['content-length']);
-        }
-        res.set('Content-Type', driveResponse.headers['content-type']);
-        
-        // Replicamos el status code (200 o 206)
-        res.status(driveResponse.status);
+        const contentLength = chunkEnd - start + 1;
+
+        res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${chunkEnd}/${totalSize}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': contentLength,
+            'Content-Type': driveResponse.headers['content-type'] || 'video/mp4',
+        });
 
         // Pipe: Enviar el stream de Google directamente al cliente
         driveResponse.data.pipe(res);
