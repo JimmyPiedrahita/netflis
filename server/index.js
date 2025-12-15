@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 const express = require('express');
-const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
@@ -9,6 +9,13 @@ const axios = require('axios');
 const app = express();
 
 const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+
+// Creamos un agente que mantiene las conexiones vivas (reutiliza el socket TCP)
+const httpsAgent = new https.Agent({ 
+    keepAlive: true, 
+    keepAliveMsecs: 10000, // Mantener vivo por 10 segundos si no hay tráfico
+    maxSockets: 50 // Permitir varias conexiones simultáneas
+});
 
 const allowedOrigins = [
     'https://netflis123.web.app',      // Frontend Producción
@@ -60,7 +67,8 @@ app.get('/stream/:fileId', async (req, res) => {
         const metadataResponse = await axios({
             method: 'get',
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
-            headers: { Authorization: `Bearer ${access_token}` }
+            headers: { Authorization: `Bearer ${access_token}` },
+            httpsAgent: httpsAgent
         });
 
         const totalSize = parseInt(metadataResponse.data.size, 10);
@@ -96,7 +104,8 @@ app.get('/stream/:fileId', async (req, res) => {
             method: 'get',
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
             headers: headers,
-            responseType: 'stream', // CLAVE: Recibir como tubería
+            responseType: 'stream', // Recibir como tubería
+            httpsAgent: httpsAgent, // Usar el agente con keep-alive
             validateStatus: (status) => status < 500 // No lanzar error en 4xx para poder leer el body si es json
         });
 
