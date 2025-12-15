@@ -16,6 +16,7 @@ const VideoPlayer = ({
         src={currentVideo.url} 
         controls 
         autoPlay 
+        preload="auto"
         className="main-video"
         onPlay={onPlay}
         onPause={onPause}

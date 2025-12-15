@@ -6,10 +6,22 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
+const axiosRetry = require('axios-retry').default;
 
 const app = express();
 
 const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+
+
+// Configuración de reintentos para Axios
+axiosRetry(axios, { 
+    retries: 3, 
+    retryDelay: axiosRetry.exponentialDelay,
+    retryCondition: (error) => {
+        // Reintentar solo si es error de red o error 5xx de Google
+        return axiosRetry.isNetworkOrIdempotentRequestError(error) || error.response?.status >= 500;
+    }
+});
 
 // Creamos un agente que mantiene las conexiones vivas (reutiliza el socket TCP)
 const httpsAgent = new https.Agent({ 
@@ -45,6 +57,8 @@ const server = http.createServer(app);
 
 //Configuracion de Socket.io (Sincronizacion)
 const io = new Server(server, {
+    pingTimeout: 60000,
+    pingInterval: 25000,
     cors: {
         origin: allowedOrigins,
         methods: ['GET', 'POST'],
@@ -69,7 +83,8 @@ app.get('/stream/:fileId', async (req, res) => {
             method: 'get',
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
             headers: { Authorization: `Bearer ${access_token}` },
-            httpsAgent: httpsAgent
+            httpsAgent: httpsAgent,
+            timeout: 5000
         });
 
         const totalSize = parseInt(metadataResponse.data.size, 10);
@@ -107,7 +122,8 @@ app.get('/stream/:fileId', async (req, res) => {
             headers: headers,
             responseType: 'stream', // Recibir como tubería
             httpsAgent: httpsAgent, // Usar el agente con keep-alive
-            validateStatus: (status) => status < 500 // No lanzar error en 4xx para poder leer el body si es json
+            validateStatus: (status) => status < 500, // No lanzar error en 4xx para poder leer el body si es json
+            timeout: 0
         });
 
         // Manejo de errores desde Google Drive
@@ -124,6 +140,7 @@ app.get('/stream/:fileId', async (req, res) => {
             'Accept-Ranges': 'bytes',
             'Content-Length': contentLength,
             'Content-Type': driveResponse.headers['content-type'] || 'video/mp4',
+            'Cache-Control': 'public, max-age=31536000, immutable',
         });
 
         // Pipe: Enviar el stream de Google directamente al cliente
@@ -135,14 +152,9 @@ app.get('/stream/:fileId', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error en el stream:', error.message);
-        if (error.response) {
-            console.error('Detalle error Google:', error.response.status);
-            console.error('Headers:', error.response.headers);
-        }
-        if (!res.headersSent) {
-            res.sendStatus(500);
-        }
+        if (error.code === 'ECONNABORTED' || error.message === 'aborted') return;
+        console.error('Error Stream:', error.message);
+        if (!res.headersSent) res.sendStatus(500);
     }
 });
 
