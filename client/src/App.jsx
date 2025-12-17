@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useWatchParty } from './hooks/useWatchParty';
 import Header from './components/Header';
 import Login from './components/Login';
@@ -29,6 +29,20 @@ function App() {
     participantCount,
     handleVideoError
   } = useWatchParty();
+
+  // Efecto para hacer scroll automático al reproductor cuando cambia el video
+  useEffect(() => {
+    if (currentVideo && videoRef.current) {
+      // Intentamos enfocar el contenedor principal del video para una mejor vista
+      const playerContainer = videoRef.current.closest('.video-player-container');
+      if (playerContainer) {
+        playerContainer.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        // Fallback al elemento de video
+        videoRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+  }, [currentVideo, videoRef]);
 
   const handleVideoSelect = (file) => {
     if (joinedRoom) {
