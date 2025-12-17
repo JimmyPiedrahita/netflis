@@ -280,6 +280,10 @@ export const useWatchParty = () => {
   };
 
   const handlePause = () => {
+    // Si la pestaña no está visible, es probable que el navegador haya pausado automáticamente
+    // No queremos propagar esto a la sala.
+    if (document.visibilityState === 'hidden') return;
+
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
       socket.emit('sync_action', { 
         type: 'pause', 
