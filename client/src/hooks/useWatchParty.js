@@ -15,6 +15,10 @@ export const useWatchParty = () => {
     return localStorage.getItem('access_token') || null;
   });
 
+  const [tokenExpiry, setTokenExpiry] = useState(() => {
+    return localStorage.getItem('token_expiry') || null;
+  });
+
   const refreshTokenRef = useRef(localStorage.getItem('refresh_token'));
 
   const [files, setFiles] = useState([]);
@@ -43,7 +47,9 @@ export const useWatchParty = () => {
     setRoomId(null);
     window.history.pushState({}, document.title, window.location.pathname);
     localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
     localStorage.removeItem('user_data');
+    localStorage.removeItem('token_expiry');
   }, []);
 
   const leaveRoom = useCallback(() => {
@@ -74,15 +80,20 @@ export const useWatchParty = () => {
                 refreshToken: storedRefreshToken
             });
 
-            const newAccessToken = res.data.access_token;
-            console.log("[HOOK] Access token renovado exitosamente");
-            localStorage.setItem('access_token', newAccessToken);
-            setToken(newAccessToken); // Esto disparará el useEffect de actualización de URL
+            const { access_token, expiry_date } = res.data;
+            console.log("[HOOK] Access token renovado exitosamente (Interceptor)");
             
-            originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+            localStorage.setItem('access_token', access_token);
+            setToken(access_token);
+            if (expiry_date) {
+                localStorage.setItem('token_expiry', expiry_date);
+                setTokenExpiry(expiry_date);
+            }
+            
+            originalRequest.headers['Authorization'] = `Bearer ${access_token}`;
             return axios(originalRequest);
           } catch (refreshError) {
-            console.error("[HOOK] Fallo el refresh token, haciendo logout", refreshError);
+            console.error("[HOOK] Fallo el refresh token, haciendo logout", refreshError.message);
             logout();
             return Promise.reject(refreshError);
           }
@@ -93,36 +104,52 @@ export const useWatchParty = () => {
     return () => axios.interceptors.response.eject(interceptor);
   }, [logout]);
 
-  // --- AUTO-REFRESH URL CUANDO CAMBIA EL TOKEN ---
-  useEffect(() => {
-    if (token && currentVideoRef.current) {
-        // Si tenemos un video cargado y el token cambió, actualizamos la URL
-        const currentUrl = currentVideoRef.current.url;
-        const urlObj = new URL(currentUrl);
-        const oldToken = urlObj.searchParams.get('access_token');
 
-        if (oldToken !== token) {
-            console.log("[HOOK] Token nuevo detectado. Actualizando URL del video...");
-            const newUrl = `${import.meta.env.VITE_API_URL}/stream/${currentVideoRef.current.id}?access_token=${token}`;
-            const updatedVideo = { ...currentVideoRef.current, url: newUrl };
-            
-            // Actualizamos localmente
-            setCurrentVideo(updatedVideo);
-            currentVideoRef.current = updatedVideo;
-            
-            // Si somos Host, enviamos la nueva URL válida a todos
-            if (isHost && roomId) {
-                 console.log("[HOOK] Como HOST, enviando nueva URL a la sala.");
-                 // Enviamos con isPlaying: false para evitar saltos bruscos mientras reconectan
-                 socket.emit('sync_action', { 
-                     type: 'change_video', 
-                     roomId: roomId, 
-                     videoData: updatedVideo 
-                 });
-            }
+  // Rutina para renovar token proactivamente
+  const refreshTokenRoutine = useCallback(async () => {
+    try {
+        const storedRefreshToken = localStorage.getItem('refresh_token');
+        if (!storedRefreshToken) return;
+
+        console.log("[SILENT-REFRESH] Iniciando renovación proactiva...");
+        const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/refresh`, {
+            refreshToken: storedRefreshToken
+        });
+
+        const { access_token, expiry_date } = res.data;
+        
+        console.log("[SILENT-REFRESH] Token renovado sin cortes.");
+        // Actualizamos LocalStorage (para llamadas API)
+        localStorage.setItem('access_token', access_token);
+        setToken(access_token);
+
+        // Actualizamos Expiración
+        if (expiry_date) {
+            localStorage.setItem('token_expiry', expiry_date);
+            setTokenExpiry(expiry_date);
         }
+    } catch (error) {
+        console.error("[SILENT-REFRESH] Error:", error.message);
     }
-  }, [token, isHost, roomId]);
+  }, []);
+
+  // Efecto para vigilar la expiración y activar la renovación
+  useEffect(() => {
+      if (!tokenExpiry || !token) return;
+
+      const now = Date.now();
+      const timeLeft = tokenExpiry - now;
+      const timeUntilRefresh = timeLeft - 120000; // Renovar 2 minutos antes
+
+      if (timeUntilRefresh <= 0) {
+          // Si ya estamos sobre la hora, renovar ya
+          refreshTokenRoutine();
+      } else {
+          console.log(`[SILENT-REFRESH] Renovación programada en ${(timeUntilRefresh/1000).toFixed(0)}s`);
+          const timer = setTimeout(refreshTokenRoutine, timeUntilRefresh);
+          return () => clearTimeout(timer);
+      }
+  }, [tokenExpiry, token, refreshTokenRoutine]);
 
   // --- MANEJO DE ERROR DE VIDEO (RECUPERACIÓN) ---
   const handleVideoError = useCallback(() => {
@@ -134,21 +161,17 @@ export const useWatchParty = () => {
       }
       retryCount.current += 1;
 
-      // Hacemos una petición dummy protegida para forzar al interceptor a renovar el token si es 401
-      // Usamos fetchVideos o cualquier endpoint ligero que requiera auth
       console.log("[VIDEO-ERROR] Forzando verificación de token...");
       axios.get('https://www.googleapis.com/drive/v3/files', {
         headers: { Authorization: `Bearer ${token}` },
-        params: { pageSize: 1 } // Petición mínima
+        params: { pageSize: 1 } 
       }).catch(err => {
-          console.log("Error en petición de recuperación (esto es normal si era 401):", err.message);
+          console.log("Error en petición de recuperación:", err.message);
       });
       
-      // Reset contador después de un rato
       setTimeout(() => { retryCount.current = 0; }, 10000);
 
   }, [token]);
-
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -164,7 +187,7 @@ export const useWatchParty = () => {
         params: { q: "mimeType contains 'video/' and trashed = false", fields: 'files(id, name, mimeType, size)', pageSize: 20 },
       });
       setFiles(response.data.files);
-    } catch (error) { console.error(error); }
+    } catch (error) { console.error("[HOOK] Error fetching videos:", error.message); }
     setLoading(false);
   }, []);
 
@@ -236,9 +259,8 @@ export const useWatchParty = () => {
           break;   
           
         case 'change_video':
-          // Solo actualizamos si es un video diferente o si la URL (token) cambió
-          if (!currentVideoRef.current || currentVideoRef.current.id !== data.videoData.id || currentVideoRef.current.url !== data.videoData.url) {
-              console.log("[SYNC] Actualizando video/token remoto");
+          if (!currentVideoRef.current || currentVideoRef.current.id !== data.videoData.id) {
+              console.log("[SYNC] Cambiando video remoto");
               setCurrentVideo(data.videoData);
               currentVideoRef.current = data.videoData; 
           }
@@ -280,8 +302,6 @@ export const useWatchParty = () => {
   };
 
   const handlePause = () => {
-    // Si la pestaña no está visible, es probable que el navegador haya pausado automáticamente
-    // No queremos propagar esto a la sala.
     if (document.visibilityState === 'hidden') return;
 
     if (!isRemoteUpdate.current && currentVideo && videoRef.current) {
@@ -307,7 +327,8 @@ export const useWatchParty = () => {
 
   const playVideo = (file, activeRoomId) => {
     const targetRoom = activeRoomId || roomId;
-    const streamUrl = `${import.meta.env.VITE_API_URL}/stream/${file.id}?access_token=${token}`;
+    const streamUrl = `${import.meta.env.VITE_API_URL}/stream/${file.id}`;
+    
     const videoData = { ...file, url: streamUrl };
     setCurrentVideo(videoData);
     currentVideoRef.current = videoData; 
@@ -329,7 +350,8 @@ export const useWatchParty = () => {
     try {
         const { code } = response;
         const res = await axios.post(`${import.meta.env.VITE_API_URL}/auth/google`, { code });
-        const { access_token, refresh_token } = res.data;
+        
+        const { access_token, refresh_token, expiry_date } = res.data;
         
         localStorage.setItem('access_token', access_token);
         setToken(access_token);
@@ -337,6 +359,11 @@ export const useWatchParty = () => {
         if (refresh_token) {
             localStorage.setItem('refresh_token', refresh_token);
             refreshTokenRef.current = refresh_token;
+        }
+
+        if (expiry_date) {
+            localStorage.setItem('token_expiry', expiry_date);
+            setTokenExpiry(expiry_date);
         }
 
         const userData = { name: "Usuario Conectado" };
@@ -347,7 +374,7 @@ export const useWatchParty = () => {
         if (roomId) joinRoomExisting(roomId);
 
     } catch (error) {
-        console.error("Error en el intercambio de tokens:", error);
+        console.error("Error en el intercambio de tokens:", error.message);
     }
   };
 

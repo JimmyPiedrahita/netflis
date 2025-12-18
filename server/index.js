@@ -7,10 +7,12 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
+const cookieParser = require('cookie-parser');
 
 const app = express();
 
 const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 // Configuración de reintentos para Axios
 axiosRetry(axios, { 
@@ -48,6 +50,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
+app.use(cookieParser()); // Middleware para leer cookies
 
 const server = http.createServer(app);
 
@@ -63,7 +66,8 @@ const io = new Server(server, {
 
 // -- MIDDLEWARE DE LOGGING GENERAL --
 app.use((req, res, next) => {
-    console.log(`[REQUEST] ${req.method} ${req.url} - IP: ${req.ip}`);
+    const sanitizedUrl = req.url.replace(/access_token=[^&]+/, 'access_token=REDACTED');
+    console.log(`[REQUEST] ${req.method} ${sanitizedUrl} - IP: ${req.ip}`);
     next();
 });
 
@@ -73,12 +77,20 @@ app.use((req, res, next) => {
 app.get('/stream/:fileId', async (req, res) => {
     const startObj = Date.now();
     let { fileId } = req.params;
-    const { access_token } = req.query;
+    const access_token = req.query.access_token || req.cookies?.access_token;
 
     console.log(`[STREAM-INIT] Solicitud de stream para FileID: ${fileId}`);
 
+    if (req.cookies?.access_token) console.log("[STREAM-AUTH] Token detectado en Cookie");
+    else if (req.query.access_token) console.log("[STREAM-AUTH] Token detectado en URL");
+    else console.warn("[STREAM-AUTH] NO SE DETECTÓ NINGÚN TOKEN");
+
     if (!fileId) return res.status(400).send('Falta el fileId');
-    if (!access_token) return res.status(401).send('Falta el Access token');
+    
+    if (!access_token) {
+        console.error(`[STREAM-ERROR] Rechazando conexión: Falta Access Token. (Cookies recibidas: ${Object.keys(req.cookies || {}).length})`);
+        return res.status(401).send('Falta el Access token (Cookie o Query)');
+    }
 
     try {
         console.log(`[STREAM-META] Obteniendo metadatos de Google Drive...`);
@@ -152,8 +164,6 @@ app.get('/stream/:fileId', async (req, res) => {
         let downloadedBytes = 0;
         driveResponse.data.on('data', (chunk) => {
             downloadedBytes += chunk.length;
-            // Descomenta la siguiente linea si quieres ver CADA pedazo (mucho ruido en consola)
-            // console.log(`[STREAM-DATA] Recibido chunk de ${chunk.length} bytes.`);
         });
 
         driveResponse.data.on('end', () => {
@@ -177,12 +187,10 @@ app.get('/stream/:fileId', async (req, res) => {
             return;
         }
         
-        // Si el error tiene respuesta (ej: 401 de Google), la devolvemos tal cual
         if (error.response && error.response.status) {
             console.error(`[STREAM-ERROR-GOOGLE] Google devolvió: ${error.response.status}`);
             if (!res.headersSent) return res.sendStatus(error.response.status);
         }
-        // -------------------
 
         console.error('[STREAM-CRITICAL] Error Stream:', error.message);
         if (!res.headersSent) res.sendStatus(500);
@@ -195,7 +203,15 @@ app.post('/auth/google', async (req, res) => {
     const { code } = req.body;
     try {
         const { tokens } = await oauth2Client.getToken(code);
-        console.log('[AUTH] Tokens obtenidos correctamente');
+        
+        res.cookie('access_token', tokens.access_token, {
+            httpOnly: true,
+            secure: IS_PROD,
+            sameSite: IS_PROD ? 'none' : 'lax',
+            maxAge: 3500 * 1000 // 58 min aprox
+        });
+
+        console.log('[AUTH] Tokens obtenidos y Cookie establecida');
         res.json(tokens);
     } catch (error) {
         console.error('[AUTH-ERROR] Error al canjear token:', error.message);
@@ -209,7 +225,15 @@ app.post('/auth/refresh', async (req, res) => {
     try {
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const { credentials } = await oauth2Client.refreshAccessToken();
-        console.log('[AUTH] Token refrescado correctamente');
+        
+        res.cookie('access_token', credentials.access_token, {
+            httpOnly: true,
+            secure: IS_PROD,
+            sameSite: IS_PROD ? 'none' : 'lax',
+            maxAge: 3500 * 1000
+        });
+
+        console.log('[AUTH] Token refrescado y Cookie actualizada');
         res.json(credentials);
     } catch (error) {
         console.error('[AUTH-ERROR] Error al refrescar token:', error.message);
@@ -237,7 +261,14 @@ io.on('connection', (socket) => {
     });
 
     socket.on('sync_action', (data) => {
-        console.log(`[SOCKET-SYNC] Acción recibida en sala ${data.roomId}:`, JSON.stringify(data));
+        const logData = { ...data };
+        if (logData.videoData && logData.videoData.url) {
+             logData.videoData = { 
+                 ...logData.videoData, 
+                 url: logData.videoData.url.replace(/access_token=[^&]+/, 'access_token=REDACTED') 
+             };
+        }
+        console.log(`[SOCKET-SYNC] Acción recibida en sala ${data.roomId}:`, JSON.stringify(logData));
         const { roomId } = data;
         socket.to(roomId).emit('sync_action', data);
     });
