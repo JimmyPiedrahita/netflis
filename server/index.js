@@ -8,12 +8,14 @@ const cors = require('cors');
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 const cookieParser = require('cookie-parser');
+const compression = require('compression');
 
 const app = express();
 
-const CHUNK_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+const INITIAL_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB (Fast Start)
+const REGULAR_CHUNK_SIZE = 3 * 1024 * 1024; // 3MB (Regular Stream)
 const IS_PROD = process.env.NODE_ENV === 'production';
-const videoSizeCache = new Map(); // Cache para tamaños de video
+const videoSizeCache = new Map();
 
 // Configuración de reintentos para Axios
 axiosRetry(axios, { 
@@ -51,12 +53,13 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.use(cookieParser()); // Middleware para leer cookies
+app.use(cookieParser());
+app.use(compression());
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    pingTimeout: 60000,
+    pingTimeout: 120000,
     pingInterval: 25000,
     cors: {
         origin: allowedOrigins,
@@ -78,7 +81,7 @@ app.get('/stream/:fileId', async (req, res) => {
     let { fileId } = req.params;
     const access_token = req.query.access_token || req.cookies?.access_token;
 
-    console.log('[STREAM-INIT] Solicitud de stream');
+    console.log('[STREAM-INIT] Solicitando video a drive');
 
     if (req.cookies?.access_token) console.log("[STREAM-AUTH] Token detectado en Cookie");
     else if (req.query.access_token) console.log("[STREAM-AUTH] Token detectado en URL");
@@ -120,22 +123,20 @@ app.get('/stream/:fileId', async (req, res) => {
             if (parts[1]) {
                 end = parseInt(parts[1], 10);
             }
-            console.log(`[STREAM-RANGE] Rango solicitado: ${range} (Parsed: ${start}-${end})`);
+            console.log(`[STREAM-RANGE] Chunk solicitado: ${(start/1024/1024).toFixed(2)}-${(end/1024/1024).toFixed(2)} MB`);
         } else {
             console.log(`[STREAM-RANGE] Cliente NO solicitó rango. Enviando desde 0.`);
         }
 
-        const chunkEnd = Math.min(end, start + CHUNK_SIZE_BYTES - 1);
-        console.log(`[STREAM-CHUNK] Solicitando a Google Bytes: ${start}-${chunkEnd} (Tamaño chunk: ${(chunkEnd - start + 1)} bytes)`);
+        // Ajuste dinámico de chunks
+        const currentChunkSize = (start === 0) ? INITIAL_CHUNK_SIZE : REGULAR_CHUNK_SIZE;
+        const chunkEnd = Math.min(end, start + currentChunkSize - 1);
+        console.log(`[STREAM-CHUNK] Solicitando Bytes: ${(start/1024/1024).toFixed(2)}-${(chunkEnd/1024/1024).toFixed(2)} MB`);
 
         const headers = {
             Authorization: `Bearer ${access_token}`,
             Range: `bytes=${start}-${chunkEnd}`
         };
-
-        // if (req.headers.range) {
-        //    headers['Range'] = req.headers.range;
-        // }
 
         const driveStartTime = Date.now();
         const driveResponse = await axios({
@@ -148,7 +149,7 @@ app.get('/stream/:fileId', async (req, res) => {
             timeout: 0
         });
 
-        console.log(`[STREAM-DRIVE-RES] Respuesta recibida de Google en ${Date.now() - driveStartTime}ms. Status: ${driveResponse.status}`);
+        console.log(`[STREAM-DRIVE-RES] Respuesta de Google en ${Date.now() - driveStartTime}ms. Status: ${driveResponse.status}`);
 
         if (driveResponse.status >= 400) {
              console.error(`[STREAM-ERROR] Error desde Google Drive: ${driveResponse.status}`);
@@ -163,6 +164,7 @@ app.get('/stream/:fileId', async (req, res) => {
             'Content-Length': contentLength,
             'Content-Type': driveResponse.headers['content-type'] || 'video/mp4',
             'Cache-Control': 'public, max-age=31536000, immutable',
+            'Keep-Alive': 'timeout=15',
         });
 
         // LOGGING DE FLUJO DE DATOS
@@ -172,17 +174,17 @@ app.get('/stream/:fileId', async (req, res) => {
         });
 
         driveResponse.data.on('end', () => {
-            console.log(`[STREAM-END] Stream finalizado desde Google. Total transferido: ${downloadedBytes} bytes. Tiempo total request: ${Date.now() - startObj}ms`);
+            console.log(`[STREAM-END] Chunk obtenido de Google: ${(downloadedBytes/1024/1024).toFixed(2)} MB. Tiempo: ${Date.now() - startObj}ms`);
         });
 
         driveResponse.data.on('error', (err) => {
-            console.error(`[STREAM-ERROR] Error en el stream de datos de Google:`, err.message);
+            console.error(`[STREAM-ERROR] Error descargando el chunk: ${err.message}`);
         });
 
         driveResponse.data.pipe(res);
 
         res.on('close', () => {
-            console.log(`[STREAM-CLOSE] Conexión cerrada por el cliente (Navegador). Bytes enviados: ${downloadedBytes}`);
+            console.log(`[STREAM-CLOSE] Chunk cerrado. Enviado: ${(downloadedBytes/1024/1024).toFixed(2)} MB`);
             driveResponse.data.destroy();
         });
 
@@ -294,5 +296,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-    console.log(`Servidor corriendo en el puerto ${PORT}`);
+    console.log(`Servidor corriendo: ${PORT}`);
 });
