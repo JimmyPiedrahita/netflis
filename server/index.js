@@ -12,8 +12,9 @@ const compression = require('compression');
 
 const app = express();
 
-const INITIAL_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB (Fast Start)
-const REGULAR_CHUNK_SIZE = 3 * 1024 * 1024; // 3MB (Regular Stream)
+const INITIAL_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB (Solo para inicio rápido)
+const MAX_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB (Chunk grande para buffering)
+const ENABLE_CONTINUOUS_STREAM = true; // Permitir streaming continuo para buffering
 const IS_PROD = process.env.NODE_ENV === 'production';
 const videoSizeCache = new Map();
 
@@ -116,27 +117,50 @@ app.get('/stream/:fileId', async (req, res) => {
         const range = req.headers.range;
         let start = 0;
         let end = totalSize - 1;
+        let clientRequestedEnd = false;
 
         if (range) {
             const parts = range.replace(/bytes=/, "").split("-");
             start = parseInt(parts[0], 10);
-            if (parts[1]) {
+            if (parts[1] && parts[1].trim() !== '') {
                 end = parseInt(parts[1], 10);
+                clientRequestedEnd = true;
             }
-            console.log(`[STREAM-RANGE] Chunk solicitado: ${(start/1024/1024).toFixed(2)}-${(end/1024/1024).toFixed(2)} MB`);
+            console.log(`[STREAM-RANGE] Chunk solicitado: ${(start/1024/1024).toFixed(2)}-${(end/1024/1024).toFixed(2)} MB (clientEnd: ${clientRequestedEnd})`);
         } else {
             console.log(`[STREAM-RANGE] Cliente NO solicitó rango. Enviando desde 0.`);
         }
 
-        // Ajuste dinámico de chunks
-        const currentChunkSize = (start === 0) ? INITIAL_CHUNK_SIZE : REGULAR_CHUNK_SIZE;
-        const chunkEnd = Math.min(end, start + currentChunkSize - 1);
+        // Si el cliente especificó un rango final, respetarlo (para buffering)
+        // Si no, hacer streaming continuo para permitir buffering del navegador
+        let chunkEnd;
+        if (clientRequestedEnd) {
+            // Respetar lo que pide el cliente
+            chunkEnd = end;
+        } else if (start === 0) {
+            // Primera solicitud: enviar chunk inicial pequeño para inicio rápido
+            chunkEnd = Math.min(end, start + INITIAL_CHUNK_SIZE - 1);
+        } else if (ENABLE_CONTINUOUS_STREAM) {
+            // Streaming continuo: enviar todo el resto del archivo
+            // Esto permite que el navegador bufferee proactivamente
+            chunkEnd = end;
+            console.log(`[STREAM-CONTINUOUS] Modo streaming continuo activado`);
+        } else {
+            // Fallback: chunks grandes
+            chunkEnd = Math.min(end, start + MAX_CHUNK_SIZE - 1);
+        }
         console.log(`[STREAM-CHUNK] Solicitando Bytes: ${(start/1024/1024).toFixed(2)}-${(chunkEnd/1024/1024).toFixed(2)} MB`);
 
         const headers = {
             Authorization: `Bearer ${access_token}`,
             Range: `bytes=${start}-${chunkEnd}`
         };
+
+        // Para streaming continuo, solicitar sin límite de rango final a Google
+        if (ENABLE_CONTINUOUS_STREAM && !clientRequestedEnd && start > 0) {
+            headers.Range = `bytes=${start}-`;
+            console.log(`[STREAM-GOOGLE] Solicitando a Google: bytes=${start}- (sin límite)`);
+        }
 
         const driveStartTime = Date.now();
         const driveResponse = await axios({
@@ -146,7 +170,7 @@ app.get('/stream/:fileId', async (req, res) => {
             responseType: 'stream',
             httpsAgent: httpsAgent,
             validateStatus: (status) => status < 500,
-            timeout: 0
+            timeout: 0 // Sin timeout para streaming largo
         });
 
         console.log(`[STREAM-DRIVE-RES] Respuesta de Google en ${Date.now() - driveStartTime}ms. Status: ${driveResponse.status}`);
@@ -156,21 +180,43 @@ app.get('/stream/:fileId', async (req, res) => {
              return res.sendStatus(driveResponse.status);
         }
 
-        const contentLength = chunkEnd - start + 1;
+        // Obtener el Content-Range real de Google Drive si está disponible
+        const googleContentRange = driveResponse.headers['content-range'];
+        let actualEnd = chunkEnd;
+        let actualContentLength = chunkEnd - start + 1;
+        
+        if (googleContentRange) {
+            // Parsear el Content-Range de Google: "bytes start-end/total"
+            const match = googleContentRange.match(/bytes (\d+)-(\d+)\/(\d+)/);
+            if (match) {
+                actualEnd = parseInt(match[2], 10);
+                actualContentLength = actualEnd - start + 1;
+                console.log(`[STREAM-GOOGLE-RANGE] Google responde: ${googleContentRange}`);
+            }
+        }
 
         res.writeHead(206, {
-            'Content-Range': `bytes ${start}-${chunkEnd}/${totalSize}`,
+            'Content-Range': `bytes ${start}-${actualEnd}/${totalSize}`,
             'Accept-Ranges': 'bytes',
-            'Content-Length': contentLength,
+            'Content-Length': actualContentLength,
             'Content-Type': driveResponse.headers['content-type'] || 'video/mp4',
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'Keep-Alive': 'timeout=15',
+            'Connection': 'keep-alive',
         });
 
         // LOGGING DE FLUJO DE DATOS
         let downloadedBytes = 0;
+        let lastLogTime = Date.now();
         driveResponse.data.on('data', (chunk) => {
             downloadedBytes += chunk.length;
+            // Log cada 5MB para streaming largo
+            if (downloadedBytes - (Math.floor(downloadedBytes / (5*1024*1024)) * 5*1024*1024) < chunk.length) {
+                const elapsed = Date.now() - lastLogTime;
+                if (elapsed > 1000) { // No más de 1 log por segundo
+                    console.log(`[STREAM-PROGRESS] Descargando: ${(downloadedBytes/1024/1024).toFixed(2)} MB`);
+                    lastLogTime = Date.now();
+                }
+            }
         });
 
         driveResponse.data.on('end', () => {

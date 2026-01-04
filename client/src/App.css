@@ -254,6 +254,14 @@ body {
   background-color: var(--surface-color);
   border-top: 1px solid var(--border-color);
   font-size: 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.buffer-info {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
 }
 
 .section-title {
