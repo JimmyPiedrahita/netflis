@@ -11,20 +11,21 @@ const cookieParser = require('cookie-parser');
 
 const app = express();
 
-const CHUNK_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const CHUNK_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 const IS_PROD = process.env.NODE_ENV === 'production';
+const videoSizeCache = new Map(); // Cache para tamaños de video
 
 // Configuración de reintentos para Axios
 axiosRetry(axios, { 
     retries: 3, 
     retryDelay: axiosRetry.exponentialDelay,
     retryCondition: (error) => {
-        if (error) console.warn(`[AXIOS RETRY] Reintentando petición por error: ${error.message}`);
+        if (error) console.warn(`[AXIOS RETRY] Reintentando: ${error.message}`);
         return axiosRetry.isNetworkOrIdempotentRequestError(error) || error.response?.status >= 500;
     }
 });
 
-const httpsAgent = new https.Agent({ 
+const httpsAgent = new https.Agent({
     keepAlive: true, 
     keepAliveMsecs: 10000, 
     maxSockets: 50 
@@ -66,8 +67,6 @@ const io = new Server(server, {
 
 // -- MIDDLEWARE DE LOGGING GENERAL --
 app.use((req, res, next) => {
-    const sanitizedUrl = req.url.replace(/access_token=[^&]+/, 'access_token=REDACTED');
-    console.log(`[REQUEST] ${req.method} ${sanitizedUrl} - IP: ${req.ip}`);
     next();
 });
 
@@ -79,7 +78,7 @@ app.get('/stream/:fileId', async (req, res) => {
     let { fileId } = req.params;
     const access_token = req.query.access_token || req.cookies?.access_token;
 
-    console.log(`[STREAM-INIT] Solicitud de stream para FileID: ${fileId}`);
+    console.log('[STREAM-INIT] Solicitud de stream');
 
     if (req.cookies?.access_token) console.log("[STREAM-AUTH] Token detectado en Cookie");
     else if (req.query.access_token) console.log("[STREAM-AUTH] Token detectado en URL");
@@ -88,22 +87,28 @@ app.get('/stream/:fileId', async (req, res) => {
     if (!fileId) return res.status(400).send('Falta el fileId');
     
     if (!access_token) {
-        console.error(`[STREAM-ERROR] Rechazando conexión: Falta Access Token. (Cookies recibidas: ${Object.keys(req.cookies || {}).length})`);
+        console.error('[STREAM-ERROR] Falta Access Token.');
         return res.status(401).send('Falta el Access token (Cookie o Query)');
     }
 
     try {
-        console.log(`[STREAM-META] Obteniendo metadatos de Google Drive...`);
-        const metadataResponse = await axios({
-            method: 'get',
-            url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
-            headers: { Authorization: `Bearer ${access_token}` },
-            httpsAgent: httpsAgent,
-            timeout: 5000
-        });
+        let totalSize;
+        if (videoSizeCache.has(fileId)) {
+            totalSize = videoSizeCache.get(fileId);
+        } else {
+            console.log(`[STREAM-META] Obteniendo metadatos de Google Drive`);
+            const metadataResponse = await axios({
+                method: 'get',
+                url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=size`,
+                headers: { Authorization: `Bearer ${access_token}` },
+                httpsAgent: httpsAgent,
+                timeout: 5000
+            });
 
-        const totalSize = parseInt(metadataResponse.data.size, 10);
-        console.log(`[STREAM-META] Tamaño total del archivo: ${totalSize} bytes (${(totalSize/1024/1024).toFixed(2)} MB)`);
+            totalSize = parseInt(metadataResponse.data.size, 10);
+            videoSizeCache.set(fileId, totalSize);
+            console.log(`[STREAM-META] Tamaño del video: ${(totalSize/1024/1024).toFixed(2)} MB`);
+        }
 
         const range = req.headers.range;
         let start = 0;
@@ -115,7 +120,7 @@ app.get('/stream/:fileId', async (req, res) => {
             if (parts[1]) {
                 end = parseInt(parts[1], 10);
             }
-            console.log(`[STREAM-RANGE] Cliente solicitó rango: ${range} (Parsed: ${start}-${end})`);
+            console.log(`[STREAM-RANGE] Rango solicitado: ${range} (Parsed: ${start}-${end})`);
         } else {
             console.log(`[STREAM-RANGE] Cliente NO solicitó rango. Enviando desde 0.`);
         }
@@ -128,9 +133,9 @@ app.get('/stream/:fileId', async (req, res) => {
             Range: `bytes=${start}-${chunkEnd}`
         };
 
-        if (req.headers.range) {
-            headers['Range'] = req.headers.range;
-        }
+        // if (req.headers.range) {
+        //    headers['Range'] = req.headers.range;
+        // }
 
         const driveStartTime = Date.now();
         const driveResponse = await axios({
@@ -243,10 +248,10 @@ app.post('/auth/refresh', async (req, res) => {
 
 // -- SOCKET.IO --
 io.on('connection', (socket) => {
-    console.log(`[SOCKET] Nuevo cliente conectado: ${socket.id}`);
+    console.log('[SOCKET] Nuevo cliente conectado');
 
     socket.on('join_room', (roomId) => {
-        console.log(`[SOCKET] Cliente ${socket.id} se une a sala ${roomId}`);
+        console.log('[SOCKET] Cliente se une a sala');
         socket.join(roomId);
         const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
         io.to(roomId).emit('room_users_update', { count: roomSize });
@@ -254,7 +259,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('leave_room', (roomId) => {
-        console.log(`[SOCKET] Cliente ${socket.id} deja sala ${roomId}`);
+        console.log('[SOCKET] Cliente deja sala');
         socket.leave(roomId);
         const roomSize = io.sockets.adapter.rooms.get(roomId)?.size || 0;
         io.to(roomId).emit('room_users_update', { count: roomSize });
@@ -268,7 +273,7 @@ io.on('connection', (socket) => {
                  url: logData.videoData.url.replace(/access_token=[^&]+/, 'access_token=REDACTED') 
              };
         }
-        console.log(`[SOCKET-SYNC] Acción recibida en sala ${data.roomId}:`, JSON.stringify(logData));
+        console.log(`[SOCKET-SYNC] Acción recibida:`, logData.type);
         const { roomId } = data;
         socket.to(roomId).emit('sync_action', data);
     });
